@@ -6,13 +6,84 @@ from keras.models import Model, model_from_json
 from food_volume_estimation.volume_estimator import VolumeEstimator, DensityDatabase
 from food_volume_estimation.depth_estimation.custom_modules import *
 from food_volume_estimation.food_segmentation.food_segmentator import FoodSegmentator
-from flask import Flask, request, jsonify, make_response, abort
-import base64
+
+import sys
+import os
+import uuid
+from fastapi import FastAPI, UploadFile
+from fastapi.param_functions import File
+from fastapi.responses import JSONResponse
+from fastapi.staticfiles import StaticFiles
+from PIL import Image
+import io
+import json
+from fastapi import FastAPI
+
+app = FastAPI()
+
+# Define a root `/` endpoint
+@app.get('/')
+def index():
+    return {'Hello': 'You'}
+
+# Serve files from the /images directory at the /images URL
+# app.mount("/images", StaticFiles(directory="images"), name="images")
+
+@app.post('/predict')
+async def vol_pred(food_type:str, plate_diameter:float, image: UploadFile = File(...)):
+    depth_model_architecture = 'models/depth_architecture.json'
+    depth_model_weights = 'models/depth_weights.h5'
+    segmentation_model_weights = 'models/segmentation_weights.h5'
+    density_db_source ='datasets/density_db.xlsx'
+
+    load_volume_estimator(depth_model_architecture,
+                          depth_model_weights,
+                          segmentation_model_weights,
+                          density_db_source)
+    try:
+        if not image.content_type.startswith("image/"):
+            return JSONResponse(status_code=400, content={"error": "Invalid file type"})
+
+        filename = f"{uuid.uuid4()}.jpg"
+        image_path = filename
+
+        with open(image_path, 'wb') as buffer:
+            contents = await image.read()
+            buffer.write(contents)
+
+        img = cv2.imread(image_path)
+
+         # Estimate volumes
+        with graph.as_default():
+            volumes = estimator.estimate_volume(img, fov=70,
+            plate_diameter_prior=plate_diameter)
+        # Convert to mL
+        volumes = [v * 1e6 for v in volumes]
+
+        # Convert volumes to weight - assuming a single food type
+        db_entry = density_db.query(food_type)
+        density = db_entry[1]
+        weight = 0
+        for v in volumes:
+            weight += v * density
+
+        # Return values
+        return_vals = {
+            'food_type_match': db_entry[0],
+            'weight': weight,
+            'volume': volumes
+        }
+
+        # Supprimez l'image après avoir terminé le traitement
+        if os.path.exists(image_path):
+            os.remove(image_path)
+
+        return return_vals
 
 
-app = Flask(__name__)
-estimator = None
-density_db = None
+    except Exception as e:
+        return JSONResponse(status_code=500, content={"error": f"An error occurred: {e}"})
+
 
 def load_volume_estimator(depth_model_architecture, depth_model_weights,
         segmentation_model_weights, density_db_source):
@@ -61,89 +132,88 @@ def load_volume_estimator(depth_model_architecture, depth_model_weights,
     global density_db
     density_db = DensityDatabase(density_db_source)
 
-@app.route('/predict', methods=['POST'])
-def volume_estimation():
-    """Receives an HTTP multipart request and returns the estimated 
-    volumes of the foods in the image given.
+# @app.route('/predict', methods=['POST'])
+# def volume_estimation():
+#     """Receives an HTTP multipart request and returns the estimated
+#     volumes of the foods in the image given.
 
-    Multipart form data:
-        img: The image file to estimate the volume in.
-        plate_diameter: The expected plate diamater to use for depth scaling.
-        If omitted then no plate scaling is applied.
+#     Multipart form data:
+#         img: The image file to estimate the volume in.
+#         plate_diameter: The expected plate diamater to use for depth scaling.
+#         If omitted then no plate scaling is applied.
 
-    Returns:
-        The array of estimated volumes in JSON format.
-    """
-    # Decode incoming byte stream to get an image
-    try:
-        content = request.get_json()
-        img_encoded = content['img']
-        img_byte_string = ' '.join([str(x) for x in img_encoded]) # If in byteArray
-        #img_byte_string = base64.b64decode(img_encoded) # Decode if in base64
-        np_img = np.fromstring(img_byte_string, np.int8, sep=' ')
-        img = cv2.imdecode(np_img, cv2.IMREAD_COLOR)
-    except Exception as e:
-        abort(406)
+#     Returns:
+#         The array of estimated volumes in JSON format.
+#     """
+#     # Decode incoming byte stream to get an image
+#     try:
+#         content = request.get_json()
+#         img_encoded = content['img']
+#         img_byte_string = ' '.join([str(x) for x in img_encoded]) # If in byteArray
+#         #img_byte_string = base64.b64decode(img_encoded) # Decode if in base64
+#         np_img = np.fromstring(img_byte_string, np.int8, sep=' ')
+#         img = cv2.imdecode(np_img, cv2.IMREAD_COLOR)
+#     except Exception as e:
+#         abort(406)
 
-    # Get food type
-    try:
-        food_type = content['food_type']
-    except Exception as e:
-        abort(406)
+#     # Get food type
+#     try:
+#         food_type = content['food_type']
+#     except Exception as e:
+#         abort(406)
 
-    # Get expected plate diameter from form data or set to 0 and ignore
-    try:
-        plate_diameter = float(content['plate_diameter'])
-    except Exception as e:
-        plate_diameter = 0
+#     # Get expected plate diameter from form data or set to 0 and ignore
+#     try:
+#         plate_diameter = float(content['plate_diameter'])
+#     except Exception as e:
+#         plate_diameter = 0
 
-    # Estimate volumes
-    with graph.as_default():
-        volumes = estimator.estimate_volume(img, fov=70,
-            plate_diameter_prior=plate_diameter)
-    # Convert to mL
-    volumes = [v * 1e6 for v in volumes]
-    
-    # Convert volumes to weight - assuming a single food type
-    db_entry = density_db.query(food_type)
-    density = db_entry[1]
-    weight = 0
-    for v in volumes:
-        weight += v * density
+#     # Estimate volumes
+#     with graph.as_default():
+#         volumes = estimator.estimate_volume(img, fov=70,
+#             plate_diameter_prior=plate_diameter)
+#     # Convert to mL
+#     volumes = [v * 1e6 for v in volumes]
 
-    # Return values
-    return_vals = {
-        'food_type_match': db_entry[0],
-        'weight': weight
-    }
-    return make_response(jsonify(return_vals), 200)
+#     # Convert volumes to weight - assuming a single food type
+#     db_entry = density_db.query(food_type)
+#     density = db_entry[1]
+#     weight = 0
+#     for v in volumes:
+#         weight += v * density
+
+#     # Return values
+#     return_vals = {
+#         'food_type_match': db_entry[0],
+#         'weight': weight
+#     }
+#     return make_response(jsonify(return_vals), 200)
 
 
-if __name__ == '__main__':
-    parser = argparse.ArgumentParser(
-        description='Food volume estimation API.')
-    parser.add_argument('--depth_model_architecture', type=str,
-                        help='Path to depth model architecture (.json).',
-                        metavar='/path/to/architecture.json',
-                        required=True)
-    parser.add_argument('--depth_model_weights', type=str,
-                        help='Path to depth model weights (.h5).',
-                        metavar='/path/to/depth/weights.h5',
-                        required=True)
-    parser.add_argument('--segmentation_model_weights', type=str,
-                        help='Path to segmentation model weights (.h5).',
-                        metavar='/path/to/segmentation/weights.h5',
-                        required=True)
-    parser.add_argument('--density_db_source', type=str,
-                        help=('Path to food density database (.xlsx) ' +
-                              'or Google Sheets ID.'),
-                        metavar='/path/to/plot/database.xlsx or <ID>',
-                        required=True)
-    args = parser.parse_args()
+# if __name__ == '__main__':
+#     parser = argparse.ArgumentParser(
+#         description='Food volume estimation API.')
+#     parser.add_argument('--depth_model_architecture', type=str,
+#                         help='Path to depth model architecture (.json).',
+#                         metavar='/path/to/architecture.json',
+#                         required=True)
+#     parser.add_argument('--depth_model_weights', type=str,
+#                         help='Path to depth model weights (.h5).',
+#                         metavar='/path/to/depth/weights.h5',
+#                         required=True)
+#     parser.add_argument('--segmentation_model_weights', type=str,
+#                         help='Path to segmentation model weights (.h5).',
+#                         metavar='/path/to/segmentation/weights.h5',
+#                         required=True)
+#     parser.add_argument('--density_db_source', type=str,
+#                         help=('Path to food density database (.xlsx) ' +
+#                               'or Google Sheets ID.'),
+#                         metavar='/path/to/plot/database.xlsx or <ID>',
+#                         required=True)
+#     args = parser.parse_args()
 
-    load_volume_estimator(args.depth_model_architecture,
-                          args.depth_model_weights, 
-                          args.segmentation_model_weights,
-                          args.density_db_source)
-    app.run(host='0.0.0.0')
-
+#     load_volume_estimator(args.depth_model_architecture,
+#                           args.depth_model_weights,
+#                           args.segmentation_model_weights,
+#                           args.density_db_source)
+#     app.run(host='0.0.0.0')

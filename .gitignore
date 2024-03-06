@@ -15,6 +15,7 @@ dist/*
 *.pyc
 *.h5
 *.hdf5
+*.env
 
 # Files to NOT ignore
 !datasets/EPIC_KITCHENS_2018/
@@ -28,4 +29,3 @@ dist/*
 !datasets/UNIMIB2016/orient_images.sh
 !assets/readme_assets/
 !models/models.md
-
